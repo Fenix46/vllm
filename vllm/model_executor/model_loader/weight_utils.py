@@ -484,6 +484,10 @@ def download_gguf(
         f"*-{quant_type}-*.gguf",
         f"*/*-{quant_type}.gguf",
         f"*/*-{quant_type}-*.gguf",
+        # Generic split patterns (e.g. model-00001-of-00005.gguf, model.gguf.001)
+        "*.gguf",
+        "*.gguf.*",
+        "*-*.gguf",
     ]
 
     # Use download_weights_from_hf which handles caching and downloading

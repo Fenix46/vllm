@@ -55,7 +55,7 @@ class GGUFModelLoader(BaseModelLoader):
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
         # repo id/filename.gguf
-        if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
+        if "/" in model_name_or_path and (".gguf" in model_name_or_path):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
             return hf_hub_download(repo_id=repo_id, filename=filename)
         # repo_id:quant_type
@@ -79,26 +79,67 @@ class GGUFModelLoader(BaseModelLoader):
     def _get_all_gguf_files(model_path: str) -> list[str]:
         """Discover all GGUF shard files from a single shard path.
 
-        Supports variable-width shard indices by dynamically detecting
-        the padding from the original filename.
-        E.g. ``*-00001-of-00005.gguf`` → all 5 shards,
-             ``*-01-of-15.gguf`` → all 15 shards.
+        Supports various shard naming conventions:
+        - *-00001-of-00005.gguf
+        - *.gguf.001
+        - *-split-00001.gguf
         """
-        match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
-        if not match:
+        if not os.path.isfile(model_path):
             return [model_path]
-        total = int(match.group(2))
-        num_digits = len(match.group(1))
-        prefix = model_path[: match.start(1)]
-        suffix = model_path[match.end(2) :]
-        files = []
-        for i in range(1, total + 1):
-            shard_path = f"{prefix}{i:0{num_digits}d}-of-{total:0{num_digits}d}{suffix}"
-            if os.path.isfile(shard_path):
+
+        # 1. Check for llama.cpp / -00001-of-00005.gguf pattern
+        match = re.search(r"-(\d+)-of-(\d+)\.gguf$", model_path)
+        if match:
+            total = int(match.group(2))
+            num_digits = len(match.group(1))
+            prefix = model_path[: match.start(1)]
+            suffix = model_path[match.end(2) :]
+            files = []
+            for i in range(1, total + 1):
+                shard_path = f"{prefix}{i:0{num_digits}d}-of-{total:0{num_digits}d}{suffix}"
+                if os.path.isfile(shard_path):
+                    files.append(shard_path)
+            if files:
+                logger.info("Discovered %d GGUF shard files", len(files))
+                return files
+
+        # 2. Check for .gguf.001 pattern
+        match = re.search(r"\.gguf\.(\d+)$", model_path)
+        if match:
+            prefix = model_path[: match.start(1)]
+            # Find all files with numeric suffix in the same directory
+            files = []
+            base_dir = os.path.dirname(model_path)
+            base_name = os.path.basename(prefix)
+            for f in sorted(os.listdir(base_dir)):
+                if f.startswith(base_name) and re.search(r"\d+$", f):
+                    files.append(os.path.join(base_dir, f))
+            if files:
+                logger.info("Discovered %d GGUF split files", len(files))
+                return files
+
+        # 3. Check for generic -00001.gguf or -split-00001.gguf
+        # if other shards exist in the same dir
+        match = re.search(r"-(\d+)\.gguf$", model_path)
+        if match:
+            prefix = model_path[: match.start(1)]
+            suffix = model_path[match.end(1) :]
+            files = []
+            i = 1
+            while True:
+                shard_path = f"{prefix}{i:05d}{suffix}"
+                if not os.path.isfile(shard_path):
+                    # Try 2-digit padding if 5-digit fails
+                    shard_path = f"{prefix}{i:02d}{suffix}"
+                    if not os.path.isfile(shard_path):
+                        break
                 files.append(shard_path)
-        if files:
-            logger.info("Discovered %d GGUF shard files", len(files))
-        return files if files else [model_path]
+                i += 1
+            if len(files) > 1:
+                logger.info("Discovered %d GGUF shard files", len(files))
+                return files
+
+        return [model_path]
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """

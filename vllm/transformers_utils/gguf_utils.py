@@ -25,7 +25,8 @@ def check_gguf_file(model: str | PathLike) -> bool:
     model = Path(model)
     if not model.is_file():
         return False
-    elif model.suffix == ".gguf":
+    # Check common extensions and split suffixes
+    if model.suffix == ".gguf" or re.search(r"\.gguf\.\d+$", model.name):
         return True
 
     try:
@@ -316,6 +317,10 @@ def get_gguf_file_path_from_hf(
         f"*-{quant_type}-*.gguf",
         f"*/*-{quant_type}.gguf",
         f"*/*-{quant_type}-*.gguf",
+        # Generic split patterns
+        "*.gguf",
+        "*.gguf.*",
+        "*-*.gguf",
     ]
     matching_files = list_filtered_repo_files(
         repo_id,
