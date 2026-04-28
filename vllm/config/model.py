@@ -1275,6 +1275,15 @@ class ModelConfig:
         parallel_config: ParallelConfig,
         block_type: LayerBlockType = "attention",
     ) -> int:
+        indices = self.get_layer_indices_by_block_type(parallel_config,
+                                                       block_type)
+        return len(indices)
+
+    def get_layer_indices_by_block_type(
+        self,
+        parallel_config: ParallelConfig,
+        block_type: LayerBlockType = "attention",
+    ) -> list[int]:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
         attn_block_type = block_type == "attention"
@@ -1285,15 +1294,18 @@ class ModelConfig:
 
         if is_transformer:
             # Handle the basic case first
-            return end - start if attn_block_type else 0
+            return list(range(start, end)) if attn_block_type else []
         elif self.is_attention_free:
             # Attention free
             # Note that this code assumes there
             # is only one type of attention-free block type.
-            return 0 if attn_block_type else end - start
+            return [] if attn_block_type else list(range(start, end))
         elif self.has_noops:
             block_configs = self.hf_config.block_configs
-            return sum(not bc.attention.no_op for bc in block_configs[start:end])
+            return [
+                i for i in range(start, end)
+                if not block_configs[i].attention.no_op
+            ] if attn_block_type else []
         else:
             # Hybrid model Jamba
             layers_block_type_value = getattr(
@@ -1302,31 +1314,42 @@ class ModelConfig:
             if layers_block_type_value is not None:
                 if self.model_arch_config.text_model_type == "zamba2":
                     if attn_block_type:
-                        return sum(
-                            t == "hybrid" for t in layers_block_type_value[start:end]
-                        )
+                        return [
+                            i for i in range(start, end)
+                            if layers_block_type_value[i] == "hybrid"
+                        ]
                     else:
-                        return self.get_num_layers(parallel_config)
-                return sum(t == block_type for t in layers_block_type_value[start:end])
+                        return list(range(start, end))
+                return [
+                    i for i in range(start, end)
+                    if layers_block_type_value[i] == block_type
+                ]
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
             if attn_type_list:
-                return sum(t == 1 for t in attn_type_list[start:end])
+                return [
+                    i for i in range(start, end) if attn_type_list[i] == 1
+                ] if attn_block_type else []
 
             # Hybrid model Qwen3Next Qwen3.5 Series
             layer_types_value = getattr(self.hf_text_config, "layer_types", None)
             if layer_types_value is not None:
                 if block_type == "attention":
-                    return sum(
-                        t == "full_attention" for t in layer_types_value[start:end]
-                    )
+                    return [
+                        i for i in range(start, end)
+                        if layer_types_value[i] == "full_attention"
+                    ]
                 elif block_type == "linear_attention":
-                    return sum(
-                        t == "linear_attention" for t in layer_types_value[start:end]
-                    )
+                    return [
+                        i for i in range(start, end)
+                        if layer_types_value[i] == "linear_attention"
+                    ]
                 else:
-                    return sum(t == block_type for t in layer_types_value[start:end])
+                    return [
+                        i for i in range(start, end)
+                        if layer_types_value[i] == block_type
+                    ]
 
             if (
                 layers_block_type_value is None
