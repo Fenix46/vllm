@@ -106,4 +106,14 @@ CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
 ////////////////////////////////////////
   #include <cuda_runtime_api.h>
   #include <cuda.h>
+
+  // Fabric memory support was added in later CUDA versions (CUDA 12.x).
+  // Define them to 0 or unused values if they are missing to allow compilation
+  // on older toolkits like CUDA 12.0.
+  #ifndef CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED
+    #define CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED ((CUdevice_attribute)128)
+  #endif
+  #ifndef CU_MEM_HANDLE_TYPE_FABRIC
+    #define CU_MEM_HANDLE_TYPE_FABRIC ((CUmemAllocationHandleType)0x8)
+  #endif
 #endif
