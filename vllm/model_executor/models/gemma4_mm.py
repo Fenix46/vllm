@@ -910,6 +910,23 @@ class Gemma4ForConditionalGeneration(
         }
     )
 
+    @staticmethod
+    def _get_embed_tokens_device_dtype(
+        embed_tokens: nn.Module,
+    ) -> tuple[torch.device, torch.dtype]:
+        # Dense path: `weight`. Quantized path (GGUF): `qweight`.
+        for attr in ("weight", "qweight"):
+            tensor = getattr(embed_tokens, attr, None)
+            if isinstance(tensor, torch.Tensor):
+                return tensor.device, tensor.dtype
+
+        # Fallback for wrappers exposing only parameters.
+        param = next(embed_tokens.parameters(), None)
+        if param is not None:
+            return param.device, param.dtype
+
+        raise RuntimeError("Cannot resolve embed_tokens device/dtype.")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -955,12 +972,15 @@ class Gemma4ForConditionalGeneration(
             # Some variants have hidden_size_per_layer_input=None (no PLE).
             ple_dim = config.text_config.hidden_size_per_layer_input
             if ple_dim is not None:
+                embed_device, embed_dtype = \
+                    self._get_embed_tokens_device_dtype(
+                        self.language_model.model.embed_tokens)
                 self.per_layer_embeddings = torch.zeros(
                     vllm_config.scheduler_config.max_num_batched_tokens,
                     config.text_config.num_hidden_layers,
                     ple_dim,
-                    device=(self.language_model.model.embed_tokens.weight.device),
-                    dtype=(self.language_model.model.embed_tokens.weight.dtype),
+                    device=embed_device,
+                    dtype=embed_dtype,
                 )
             else:
                 self.per_layer_embeddings = None
