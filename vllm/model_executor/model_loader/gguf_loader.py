@@ -350,8 +350,12 @@ class GGUFModelLoader(BaseModelLoader):
 
             return gguf_name + "." + suffix
 
+        # Collect available tensor names from GGUF files early.
+        available_gguf_names = self._collect_gguf_tensor_names(model_config)
+
         # Build mapping and track unmapped parameters
         unmapped_params = []
+        maybe_optional_unmapped = []
         for hf_name in state_dict:
             gguf_name_with_suffix = find_hf_name_in_tensor_map(hf_name)
 
@@ -362,23 +366,108 @@ class GGUFModelLoader(BaseModelLoader):
             elif hf_name not in gguf_to_hf_name_map.values():
                 # Parameter not in manual overrides either
                 unmapped_params.append(hf_name)
+                maybe_optional_unmapped.append(hf_name)
 
         # All parameters (except those initialized by other means) must be mapped:
-        # both vision/projector and backbone
+        # both vision/projector and backbone.
+        # Some GGUF exports use near-HF naming rather than standardized gguf-py names.
+        # Use file-driven fallback matching to recover those mappings.
         if unmapped_params:
-            unmapped_params = list(
-                filter(
-                    lambda x: not any(re.fullmatch(p, x) for p in sideload_params),
-                    unmapped_params,
-                )
-            )
+            unmapped_params = [
+                x for x in unmapped_params
+                if not any(re.fullmatch(p, x) for p in sideload_params)
+            ]
+            if unmapped_params:
+                for hf_name in list(unmapped_params):
+                    if hf_name in gguf_to_hf_name_map.values():
+                        unmapped_params.remove(hf_name)
+                        continue
+                    for gguf_name in self._fallback_gguf_names_for_hf_param(hf_name):
+                        if gguf_name in available_gguf_names and \
+                                gguf_name not in gguf_to_hf_name_map:
+                            gguf_to_hf_name_map[gguf_name] = hf_name
+                            unmapped_params.remove(hf_name)
+                            break
+            # If none of aliases exist in actual GGUF files, treat param as
+            # optional for this checkpoint variant (converter may omit it).
+            if unmapped_params:
+                unresolved = []
+                for hf_name in unmapped_params:
+                    aliases = self._fallback_gguf_names_for_hf_param(hf_name)
+                    if any(alias in available_gguf_names for alias in aliases):
+                        unresolved.append(hf_name)
+                unmapped_params = unresolved
         if unmapped_params:
+            grouped = self._group_unmapped_params(unmapped_params)
             raise RuntimeError(
                 f"Failed to map GGUF parameters "
                 f"({len(unmapped_params)}): "
-                f"{unmapped_params}"
+                f"{unmapped_params}. "
+                f"Groups: {grouped}"
             )
+        if maybe_optional_unmapped:
+            optional_groups = self._group_unmapped_params([
+                x for x in maybe_optional_unmapped if x not in gguf_to_hf_name_map.values()
+            ])
+            if optional_groups:
+                logger.warning(
+                    "GGUF checkpoint omitted %d HF parameters (treated optional): %s",
+                    sum(optional_groups.values()),
+                    optional_groups,
+                )
         return gguf_to_hf_name_map
+
+    def _collect_gguf_tensor_names(self, model_config: ModelConfig) -> set[str]:
+        model_path = self._prepare_weights(model_config)
+        gguf_files = self._get_all_gguf_files(model_path)
+        # For multimodal models, mmproj can contain vision/projector tensors.
+        if hasattr(model_config.hf_config, "vision_config"):
+            mmproj_file = detect_gguf_multimodal(model_path)
+            if mmproj_file is not None:
+                gguf_files.append(mmproj_file)
+        names: set[str] = set()
+        for gguf_file in dict.fromkeys(gguf_files):
+            reader = gguf.GGUFReader(gguf_file)
+            names.update(tensor.name for tensor in reader.tensors)
+        return names
+
+    @staticmethod
+    def _fallback_gguf_names_for_hf_param(hf_name: str) -> list[str]:
+        names = {
+            hf_name,
+            hf_name.replace(".linear.weight", ".weight"),
+            hf_name.replace(".linear.bias", ".bias"),
+        }
+        if hf_name.startswith("model."):
+            no_model = hf_name[6:]
+            names.update({
+                no_model,
+                no_model.replace(".linear.weight", ".weight"),
+                no_model.replace(".linear.bias", ".bias"),
+            })
+        if hf_name.startswith("model.language_model."):
+            text_name = "model." + hf_name[len("model.language_model."):]
+            names.update({
+                text_name,
+                text_name.replace(".linear.weight", ".weight"),
+                text_name.replace(".linear.bias", ".bias"),
+            })
+        if hf_name.startswith("language_model."):
+            text_name = "model." + hf_name[len("language_model."):]
+            names.update({
+                text_name,
+                text_name.replace(".linear.weight", ".weight"),
+                text_name.replace(".linear.bias", ".bias"),
+            })
+        return sorted(names)
+
+    @staticmethod
+    def _group_unmapped_params(unmapped_params: list[str]) -> dict[str, int]:
+        grouped: dict[str, int] = {}
+        for name in unmapped_params:
+            prefix = ".".join(name.split(".")[:3])
+            grouped[prefix] = grouped.get(prefix, 0) + 1
+        return dict(sorted(grouped.items(), key=lambda kv: kv[1], reverse=True))
 
     def _get_gguf_weight_type(
         self,

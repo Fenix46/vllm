@@ -219,3 +219,23 @@ class TestGGUFModelLoader:
         model_config.model = "invalid-format"
         with pytest.raises(ValueError, match="Unrecognised GGUF reference"):
             loader._prepare_weights(model_config)
+
+    def test_fallback_gguf_names_for_hf_param(self):
+        names = GGUFModelLoader._fallback_gguf_names_for_hf_param(
+            "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight"
+        )
+        assert (
+            "model.vision_tower.encoder.layers.0.self_attn.q_proj.weight" in names
+        )
+        assert (
+            "vision_tower.encoder.layers.0.self_attn.q_proj.weight" in names
+        )
+
+    def test_group_unmapped_params(self):
+        grouped = GGUFModelLoader._group_unmapped_params([
+            "model.vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight",
+            "model.vision_tower.encoder.layers.0.self_attn.k_proj.linear.weight",
+            "model.language_model.layers.0.router.scale",
+        ])
+        assert grouped["model.vision_tower.encoder"] == 2
+        assert grouped["model.language_model.layers"] == 1
