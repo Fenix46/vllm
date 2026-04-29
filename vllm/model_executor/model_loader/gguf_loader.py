@@ -8,6 +8,7 @@ import gguf
 import regex as re
 import torch
 import torch.nn as nn
+from torch.nn.parameter import UninitializedParameter
 from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
@@ -356,7 +357,8 @@ class GGUFModelLoader(BaseModelLoader):
         # Build mapping and track unmapped parameters
         unmapped_params = []
         maybe_optional_unmapped = []
-        for hf_name in state_dict:
+        unmapped_tensors: dict[str, torch.Tensor] = {}
+        for hf_name, tensor in state_dict.items():
             gguf_name_with_suffix = find_hf_name_in_tensor_map(hf_name)
 
             # Track mapping success
@@ -367,6 +369,7 @@ class GGUFModelLoader(BaseModelLoader):
                 # Parameter not in manual overrides either
                 unmapped_params.append(hf_name)
                 maybe_optional_unmapped.append(hf_name)
+                unmapped_tensors[hf_name] = tensor
 
         # All parameters (except those initialized by other means) must be mapped:
         # both vision/projector and backbone.
@@ -393,6 +396,13 @@ class GGUFModelLoader(BaseModelLoader):
             if unmapped_params:
                 unresolved = []
                 for hf_name in unmapped_params:
+                    tensor = unmapped_tensors.get(hf_name)
+                    # Generic rule: parameters represented as uninitialized
+                    # placeholders in GGUF-backed modules are required and
+                    # must be mapped/loaded before runtime.
+                    if isinstance(tensor, UninitializedParameter):
+                        unresolved.append(hf_name)
+                        continue
                     aliases = self._fallback_gguf_names_for_hf_param(hf_name)
                     if any(alias in available_gguf_names for alias in aliases):
                         unresolved.append(hf_name)
