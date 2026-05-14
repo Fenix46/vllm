@@ -520,6 +520,7 @@ class GGUFModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         model_name_or_path: str,
         gguf_to_hf_name_map: dict[str, str],
+        unquant_set: set[str] | None = None,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """
         Iterate over GGUF model weights, loading from both main model file and
@@ -536,23 +537,52 @@ class GGUFModelLoader(BaseModelLoader):
         is_multimodal = (detect_gguf_multimodal(model_name_or_path) is not None
                           and hasattr(hf_config, "vision_config"))
 
+        _qtypes: dict[str, gguf.GGMLQuantizationType] = {}
+
+        def _process_weight(name: str, tensor: torch.Tensor
+                            ) -> tuple[str, torch.Tensor] | None:
+            if unquant_set is None:
+                return name, tensor
+            if name.endswith(".qweight_type"):
+                base = name.rsplit(".", 1)[0]
+                if base in unquant_set:
+                    _qtypes[base] = gguf.GGMLQuantizationType(int(tensor.item()))
+                    return None
+            if name.endswith(".qweight"):
+                base = name.rsplit(".", 1)[0]
+                if base in unquant_set:
+                    import numpy as np
+                    raw_np = tensor.numpy()
+                    float_np = gguf.dequantize(raw_np, _qtypes[base])
+                    return base + ".weight", torch.from_numpy(np.asarray(float_np))
+                # Non-unquant qweight: pass through as-is (vLLM's GGUFLinear handles it)
+                return name, tensor
+            return name, tensor
+
+        def _filtered_iterator(base_iter):
+            for name, tensor in base_iter:
+                result = _process_weight(name, tensor)
+                if result is not None:
+                    yield result
+
         if is_multimodal:
             # Load mm_proj (mm_encoder + projector) for multimodal weights
             mmproj_file = detect_gguf_multimodal(model_name_or_path)
             assert mmproj_file is not None, (
                 "Could not find mm_proj file for multimodal GGUF model"
             )
-            yield from gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
+            yield from _filtered_iterator(
+                gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map))
 
         gguf_files = self._get_all_gguf_files(model_name_or_path)
         if len(gguf_files) > 1:
-            yield from gguf_quant_weights_iterator_multi(
-                gguf_files, gguf_to_hf_name_map
-            )
+            yield from _filtered_iterator(
+                gguf_quant_weights_iterator_multi(
+                    gguf_files, gguf_to_hf_name_map))
         else:
-            yield from gguf_quant_weights_iterator(
-                model_name_or_path, gguf_to_hf_name_map
-            )
+            yield from _filtered_iterator(
+                gguf_quant_weights_iterator(
+                    model_name_or_path, gguf_to_hf_name_map))
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config)
@@ -560,9 +590,19 @@ class GGUFModelLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         local_model_path = self._prepare_weights(model_config)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
+        # Get unquantized module names to skip their qweight_type entries.
+        # These modules (e.g. ParallelLMHead, VocabParallelEmbedding) don't
+        # support GGUF qweight_type parameters.
+        unquant_set: set[str] | None = None
+        try:
+            from vllm.model_executor.layers.quantization.gguf import GGUFConfig
+            qcfg = GGUFConfig.from_config(model_config.hf_config)
+            unquant_set = set(qcfg.unquantized_modules)
+        except Exception:
+            pass
         model.load_weights(
-            self._get_weights_iterator(model_config, local_model_path, gguf_weights_map)
-        )
+            self._get_weights_iterator(model_config, local_model_path,
+                                        gguf_weights_map, unquant_set))
 
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
