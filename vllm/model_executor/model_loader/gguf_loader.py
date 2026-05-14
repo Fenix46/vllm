@@ -587,6 +587,9 @@ class GGUFModelLoader(BaseModelLoader):
             for name, weight_type in weight_type_map.items()
             if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
         ]
+        # lm_head and embed_tokens are always unquantized — ParallelLMHead
+        # and VocabParallelEmbedding don't support GGUF quantized weight types.
+        unquant_names.extend(["lm_head", "embed_tokens"])
         logger.debug("GGUF unquantized modules: %s", unquant_names)
         if TYPE_CHECKING:
             vllm_config.quant_config = cast(GGUFConfig, vllm_config.quant_config)
