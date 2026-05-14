@@ -174,7 +174,7 @@ class GGUFModelLoader(BaseModelLoader):
             model_type = "deepseek2"
             # GGUF layer map assumes that we will have a merged expert weights
             # so we need to map them manually
-            for idx in range(config.num_hidden_layers):
+            for idx in range(text_config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.exp_probs_b.bias"] = (
                     f"model.layers.{idx}.mlp.gate.e_score_correction_bias"
                 )
@@ -197,7 +197,7 @@ class GGUFModelLoader(BaseModelLoader):
             model_type = model_type.replace("_", "")
             # GGUF layer map assumes that we will have a merged expert weights
             # so we need to map them manually
-            for idx in range(config.num_hidden_layers):
+            for idx in range(text_config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
                 )
@@ -217,7 +217,7 @@ class GGUFModelLoader(BaseModelLoader):
             model_type = "minimax-m2"
             # GGUF layer map assumes merged expert weights
             # map them manually like deepseek2
-            for idx in range(config.num_hidden_layers):
+            for idx in range(text_config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.exp_probs_b.bias"] = (
                     f"model.layers.{idx}.block_sparse_moe.e_score_correction_bias"
                 )
