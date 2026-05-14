@@ -1708,7 +1708,6 @@ class EngineArgs:
             if model_config.is_hybrid:
                 # For hybrid models, skip the first N and last N ATTENTION layers
                 # instead of global layer indices.
-                from vllm.config.parallel import ParallelConfig
                 # Create a dummy parallel config to get indices for the whole model
                 p_cfg = ParallelConfig(
                     pipeline_parallel_size=1,

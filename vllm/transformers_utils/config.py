@@ -567,6 +567,248 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
+# GGUF type constants for decoding metadata field values
+_GGUF_TYPE_UINT8 = 0
+_GGUF_TYPE_INT8 = 1
+_GGUF_TYPE_UINT16 = 2
+_GGUF_TYPE_INT16 = 3
+_GGUF_TYPE_UINT32 = 4
+_GGUF_TYPE_INT32 = 5
+_GGUF_TYPE_FLOAT32 = 6
+_GGUF_TYPE_BOOL = 7
+_GGUF_TYPE_STRING = 8
+_GGUF_TYPE_ARRAY = 9
+_GGUF_TYPE_UINT64 = 10
+_GGUF_TYPE_INT64 = 11
+_GGUF_TYPE_FLOAT64 = 12
+
+
+def _decode_gguf_value(raw: Any, data_type: int) -> Any:
+    if data_type in (_GGUF_TYPE_UINT8, _GGUF_TYPE_INT8, _GGUF_TYPE_UINT16,
+                     _GGUF_TYPE_INT16, _GGUF_TYPE_UINT32, _GGUF_TYPE_INT32,
+                     _GGUF_TYPE_UINT64, _GGUF_TYPE_INT64):
+        return int(raw[0])
+    if data_type in (_GGUF_TYPE_FLOAT32, _GGUF_TYPE_FLOAT64):
+        return float(raw[0])
+    if data_type == _GGUF_TYPE_BOOL:
+        return bool(raw[0])
+    if data_type == _GGUF_TYPE_STRING:
+        try:
+            return bytes(raw).decode("utf-8")
+        except UnicodeDecodeError:
+            return bytes(raw).decode("utf-8", errors="replace")
+    return None
+
+
+def _read_gguf_config_dict(model_path: str) -> dict[str, Any]:
+    """Build a HF-compatible config dict from GGUF file metadata.
+
+    Uses the ``gguf`` Python library directly, bypassing HuggingFace
+    transformers' ``load_gguf_checkpoint`` which has a hard-coded
+    whitelist of supported architectures.
+    """
+    import gguf
+    from gguf.constants import Keys
+
+    reader = gguf.GGUFReader(model_path)
+    fields = reader.fields
+    config: dict[str, Any] = {}
+
+    for key, field in fields.items():
+        if not field.data:
+            continue
+
+        type_list = field.types if isinstance(field.types, list) else [field.types]
+        raw = field.parts[field.data[0]]
+
+        if len(type_list) == 1:
+            value = _decode_gguf_value(raw, type_list[0])
+        elif len(type_list) >= 2 and type_list[0] == _GGUF_TYPE_ARRAY:
+            value = _decode_gguf_value(raw, type_list[1])
+        else:
+            continue
+
+        if value is None:
+            continue
+
+        if key == Keys.General.ARCHITECTURE:
+            config["model_type"] = value
+            config["architectures"] = [f"{value}ForCausalLM"]
+        elif key.startswith("general."):
+            continue
+        elif "." in key:
+            config_key = key.split(".", 1)[1]
+            config[config_key] = value
+
+    return config
+
+
+# GGUF architecture name → vLLM model_type mapping
+_GGUF_ARCH_TO_VLLM_MODEL_TYPE: dict[str, str] = {
+    "qwen35moe": "qwen3_5_moe",
+    "qwen35": "qwen3_5",
+}
+
+# vLLM model_type → HF architecture name for model registry lookup
+_VLLM_MODEL_TYPE_TO_ARCH: dict[str, str] = {
+    "qwen3_5_moe": "Qwen3_5MoeForConditionalGeneration",
+    "qwen3_5": "Qwen3_5ForConditionalGeneration",
+    "qwen3_moe": "Qwen3MoeForCausalLM",
+    "qwen2_moe": "Qwen2MoeForCausalLM",
+    "qwen3": "Qwen3ForCausalLM",
+    "qwen2": "Qwen2ForCausalLM",
+    "gemma3": "Gemma3ForCausalLM",
+    "gemma3_text": "Gemma3ForCausalLM",
+}
+
+# GGUF config key → HF config key mapping per architecture
+_GGUF_TO_HF_CONFIG_KEYS: dict[str, dict[str, str]] = {
+    "qwen3_moe": {
+        "block_count": "num_hidden_layers",
+        "embedding_length": "hidden_size",
+        "feed_forward_length": "intermediate_size",
+        "attention.head_count": "num_attention_heads",
+        "attention.head_count_kv": "num_key_value_heads",
+        "attention.key_length": "head_dim",
+        "context_length": "max_position_embeddings",
+        "rope.freq_base": "rope_theta",
+        "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+        "expert_count": "num_experts",
+        "expert_used_count": "num_experts_per_tok",
+        "vocab_size": "vocab_size",
+    },
+    "qwen2_moe": {
+        "block_count": "num_hidden_layers",
+        "embedding_length": "hidden_size",
+        "feed_forward_length": "intermediate_size",
+        "attention.head_count": "num_attention_heads",
+        "attention.head_count_kv": "num_key_value_heads",
+        "context_length": "max_position_embeddings",
+        "rope.freq_base": "rope_theta",
+        "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+        "expert_count": "num_experts",
+        "expert_used_count": "num_experts_per_tok",
+        "vocab_size": "vocab_size",
+    },
+    "qwen2": {
+        "block_count": "num_hidden_layers",
+        "embedding_length": "hidden_size",
+        "feed_forward_length": "intermediate_size",
+        "attention.head_count": "num_attention_heads",
+        "attention.head_count_kv": "num_key_value_heads",
+        "context_length": "max_position_embeddings",
+        "rope.freq_base": "rope_theta",
+        "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+        "vocab_size": "vocab_size",
+    },
+    "qwen3": {
+        "block_count": "num_hidden_layers",
+        "embedding_length": "hidden_size",
+        "feed_forward_length": "intermediate_size",
+        "attention.head_count": "num_attention_heads",
+        "attention.head_count_kv": "num_key_value_heads",
+        "context_length": "max_position_embeddings",
+        "rope.freq_base": "rope_theta",
+        "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+        "vocab_size": "vocab_size",
+    },
+    "llama": {
+        "block_count": "num_hidden_layers",
+        "embedding_length": "hidden_size",
+        "feed_forward_length": "intermediate_size",
+        "attention.head_count": "num_attention_heads",
+        "attention.head_count_kv": "num_key_value_heads",
+        "context_length": "max_position_embeddings",
+        "rope.dimension_count": "head_dim",
+        "rope.freq_base": "rope_theta",
+        "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+        "vocab_size": "vocab_size",
+    },
+    "gemma3": {
+        "block_count": "num_hidden_layers",
+        "embedding_length": "hidden_size",
+        "feed_forward_length": "intermediate_size",
+        "attention.head_count": "num_attention_heads",
+        "attention.head_count_kv": "num_key_value_heads",
+        "attention.key_length": "head_dim",
+        "context_length": "max_position_embeddings",
+        "rope.freq_base": "rope_theta",
+        "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+        "attention.sliding_window": "sliding_window",
+        "vocab_size": "vocab_size",
+    },
+}
+
+
+def _normalize_gguf_arch(gguf_arch: str) -> tuple[str, str]:
+    vllm_type = _GGUF_ARCH_TO_VLLM_MODEL_TYPE.get(gguf_arch, gguf_arch)
+    for key in _GGUF_TO_HF_CONFIG_KEYS:
+        if gguf_arch == key:
+            return vllm_type, key
+        if vllm_type.replace("_", "") == key.replace("_", ""):
+            return vllm_type, key
+    gguf_flat = gguf_arch.replace("_", "")
+    for key in _GGUF_TO_HF_CONFIG_KEYS:
+        if key.replace("_", "") == gguf_flat:
+            return vllm_type, key
+    if "moe" in gguf_arch:
+        for key in _GGUF_TO_HF_CONFIG_KEYS:
+            if key.endswith("moe") and "qwen" in key and "qwen" in gguf_arch:
+                return vllm_type, key
+    return vllm_type, gguf_arch
+
+
+def _build_gguf_pretrained_config(model_path: str) -> PretrainedConfig:
+    """Build a ``PretrainedConfig`` directly from a GGUF file's metadata.
+
+    Reads the GGUF metadata using the ``gguf`` Python library and
+    constructs an HF-compatible config, bypassing HuggingFace transformers'
+    architecture whitelist.
+    """
+    config_dict = _read_gguf_config_dict(model_path)
+    gguf_arch = config_dict.get("model_type", "")
+    vllm_model_type, mapping_arch = _normalize_gguf_arch(gguf_arch)
+
+    key_map = _GGUF_TO_HF_CONFIG_KEYS.get(mapping_arch, {})
+    mapped: dict[str, Any] = {"model_type": vllm_model_type}
+
+    for gguf_key, value in config_dict.items():
+        if gguf_key in ("model_type", "architectures"):
+            continue
+        hf_key = key_map.get(gguf_key, gguf_key)
+        mapped[hf_key] = value
+
+    if vllm_model_type in _CONFIG_REGISTRY:
+        config_class = _CONFIG_REGISTRY[vllm_model_type]
+
+        arch_name = _VLLM_MODEL_TYPE_TO_ARCH.get(vllm_model_type)
+        if arch_name is None:
+            parts = vllm_model_type.split("_")
+            pascal = "".join(p.capitalize() for p in parts)
+            arch_name = f"{pascal}ForCausalLM"
+        mapped["architectures"] = [arch_name]
+
+        sub_configs = getattr(config_class, "sub_configs", {})
+        if "text_config" in sub_configs:
+            text_cls = sub_configs["text_config"]
+            import inspect
+            sig = inspect.signature(text_cls.__init__)
+            text_params = {
+                k: v for k, v in mapped.items()
+                if k in sig.parameters and k not in ("self", "kwargs")
+            }
+            for k in text_params:
+                mapped.pop(k, None)
+            mapped["text_config"] = text_params
+        config = config_class(**mapped)
+    else:
+        AutoConfig.register(vllm_model_type, PretrainedConfig, exist_ok=True)
+        config = AutoConfig.for_model(vllm_model_type, **mapped)
+        config.model_type = vllm_model_type
+
+    return _maybe_remap_hf_config_attrs(config)
+
+
 def maybe_override_with_speculators(
     model: str,
     tokenizer: str | None,
@@ -594,20 +836,24 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     if check_gguf_file(model):
-        kwargs["gguf_file"] = Path(model).name
-        gguf_model_repo = Path(model).parent
+        config_dict = _read_gguf_config_dict(model)
     elif is_remote_gguf(model):
         repo_id, _ = split_remote_gguf(model)
-        gguf_model_repo = Path(repo_id)
+        kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            repo_id,
+            revision=revision,
+            token=hf_token,
+            **without_trust_remote_code(kwargs),
+        )
     else:
-        gguf_model_repo = None
-    kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model if gguf_model_repo is None else gguf_model_repo,
-        revision=revision,
-        token=hf_token,
-        **without_trust_remote_code(kwargs),
-    )
+        kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model,
+            revision=revision,
+            token=hf_token,
+            **without_trust_remote_code(kwargs),
+        )
     speculators_config = config_dict.get("speculators_config")
 
     if speculators_config is None:
@@ -645,16 +891,26 @@ def get_config(
 
     _is_gguf = is_gguf(model)
     _is_remote_gguf = is_remote_gguf(model)
+
+    if _is_gguf and check_gguf_file(model):
+        config = _build_gguf_pretrained_config(str(model))
+
+        if hf_overrides_fn is not None:
+            config = hf_overrides_fn(config)
+        if hf_overrides_kw is not None:
+            config.update(hf_overrides_kw)
+
+        model_type = config.model_type
+        if model_type in {"qwen3_moe", "qwen3_5_moe"}:
+            config.update({"norm_topk_prob": True})
+
+        return config
+
     if _is_gguf:
-        if check_gguf_file(model):
-            # Local GGUF file
-            kwargs["gguf_file"] = Path(model).name
-            model = Path(model).parent
-        elif _is_remote_gguf:
-            # Remote GGUF - extract repo_id from repo_id:quant_type format
-            # The actual GGUF file will be downloaded later by GGUFModelLoader
-            # Keep model as repo_id:quant_type for download, but use repo_id for config
-            model, _ = split_remote_gguf(model)
+        # Remote GGUF - extract repo_id from repo_id:quant_type format
+        # The actual GGUF file will be downloaded later by GGUFModelLoader
+        # Keep model as repo_id:quant_type for download, but use repo_id for config
+        model, _ = split_remote_gguf(model)
 
     if config_format == "auto":
         try:
@@ -735,7 +991,7 @@ def get_config(
                 config.update({key: gguf_default})
 
         # Apply architecture-specific GGUF defaults.
-        if config.model_type in {"qwen3_moe"}:
+        if config.model_type in {"qwen3_moe", "qwen3_5_moe"}:
             # Qwen3 MoE: norm_topk_prob is always true.
             # Note that, this parameter is always false (HF default) on Qwen2 MoE.
             apply_gguf_default("norm_topk_prob", True)
