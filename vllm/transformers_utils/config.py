@@ -801,6 +801,14 @@ def _build_gguf_pretrained_config(model_path: str) -> PretrainedConfig:
                 mapped.pop(k, None)
             mapped["text_config"] = text_params
         config = config_class(**mapped)
+        if hasattr(config, "text_config") and config.text_config is not None:
+            for attr in ("vocab_size", "hidden_size", "num_hidden_layers",
+                         "num_attention_heads", "num_key_value_heads",
+                         "max_position_embeddings", "intermediate_size",
+                         "pad_token_id"):
+                val = getattr(config.text_config, attr, None)
+                if val is not None and not hasattr(config, attr):
+                    setattr(config, attr, val)
     else:
         AutoConfig.register(vllm_model_type, PretrainedConfig, exist_ok=True)
         config = AutoConfig.for_model(vllm_model_type, **mapped)
