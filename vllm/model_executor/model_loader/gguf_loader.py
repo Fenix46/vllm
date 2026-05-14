@@ -266,16 +266,12 @@ class GGUFModelLoader(BaseModelLoader):
         # For multimodal: use AutoModelForImageTextToText to get
         # language + vision + projector params
         # For text-only: use AutoModelForCausalLM to get language model params
-        # For composite configs that always wrap text_config (e.g. Qwen3_5MoeConfig),
-        # use text_config directly so HF modeling code finds all expected attributes.
-        text_only_config = text_config if not is_multimodal else config
         auto_cls = (
             AutoModelForImageTextToText if is_multimodal else AutoModelForCausalLM
         )
         with torch.device("meta"):
             dummy_model = auto_cls.from_config(
-                text_only_config,
-                trust_remote_code=model_config.trust_remote_code,
+                config, trust_remote_code=model_config.trust_remote_code
             )
 
         state_dict = dummy_model.state_dict()
