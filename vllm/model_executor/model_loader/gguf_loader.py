@@ -158,8 +158,16 @@ class GGUFModelLoader(BaseModelLoader):
         # models, this returns config itself.
         text_config = config.get_text_config()
         model_type = config.model_type
+        # Check if there is an actual mmproj file on disk.  Some configs
+        # (e.g. Qwen3_5MoeConfig) always create a vision_config sub-object
+        # even for text-only models, so we must not treat them as multimodal
+        # unless a vision projector GGUF file is present.
+        has_vision_projector = (detect_gguf_multimodal(
+            self._prepare_weights(model_config)) is not None)
         is_multimodal = (
-            hasattr(config, "vision_config") and config.vision_config is not None
+            hasattr(config, "vision_config")
+            and config.vision_config is not None
+            and has_vision_projector
         )
         gguf_to_hf_name_map = {}
         sideload_params: list[re.Pattern] = []
@@ -489,7 +497,8 @@ class GGUFModelLoader(BaseModelLoader):
         weight_type_map = {}
         for f in gguf_files:
             weight_type_map.update(get_gguf_weight_type_map(f, gguf_to_hf_name_map))
-        is_multimodal = hasattr(model_config.hf_config, "vision_config")
+        is_multimodal = (detect_gguf_multimodal(model_name_or_path) is not None
+                          and hasattr(model_config.hf_config, "vision_config"))
         if is_multimodal:
             mmproj_file = detect_gguf_multimodal(model_name_or_path)
             assert mmproj_file is not None, (
@@ -520,7 +529,8 @@ class GGUFModelLoader(BaseModelLoader):
             Tuples of (parameter_name, tensor) for all model weights
         """
         hf_config = model_config.hf_config
-        is_multimodal = hasattr(hf_config, "vision_config")
+        is_multimodal = (detect_gguf_multimodal(model_name_or_path) is not None
+                          and hasattr(hf_config, "vision_config"))
 
         if is_multimodal:
             # Load mm_proj (mm_encoder + projector) for multimodal weights
