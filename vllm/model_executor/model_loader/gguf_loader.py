@@ -587,19 +587,10 @@ class GGUFModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config)
 
-    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+    def load_weights(self, model: nn.Module, model_config: ModelConfig,
+                     unquant_set: set[str] | None = None) -> None:
         local_model_path = self._prepare_weights(model_config)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
-        # Get unquantized module names to skip their qweight_type entries.
-        # These modules (e.g. ParallelLMHead, VocabParallelEmbedding) don't
-        # support GGUF qweight_type parameters.
-        unquant_set: set[str] | None = None
-        try:
-            from vllm.model_executor.layers.quantization.gguf import GGUFConfig
-            qcfg = GGUFConfig.from_config(model_config.hf_config)
-            unquant_set = set(qcfg.unquantized_modules)
-        except Exception:
-            pass
         model.load_weights(
             self._get_weights_iterator(model_config, local_model_path,
                                         gguf_weights_map, unquant_set))
@@ -635,11 +626,13 @@ class GGUFModelLoader(BaseModelLoader):
             vllm_config.quant_config = cast(GGUFConfig, vllm_config.quant_config)
         vllm_config.quant_config.unquantized_modules.extend(unquant_names)
 
+        unquant_set = set(unquant_names)
+
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config, prefix=prefix)
-            self.load_weights(model, model_config)
+            self.load_weights(model, model_config, unquant_set=unquant_set)
 
             process_weights_after_loading(model, model_config, target_device)
         return model
